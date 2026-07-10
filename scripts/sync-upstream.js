@@ -145,10 +145,51 @@ async function getWindowsVersion() {
   if (!info.categoryId) throw new Error("No CategoryID");
   const pkgs = await msstore.getFileList(cookie, info.categoryId, "Retail");
   if (pkgs.length === 0) throw new Error("No packages");
-  const pkg = pkgs[0];
+  const pkg = selectWindowsX64Package(pkgs);
   const url = await msstore.getDownloadUrl(pkg.updateID, pkg.revisionNumber, "Retail", pkg.digest);
   const verMatch = pkg.name.match(/_(\d+\.\d+\.\d+(?:\.\d+)?)_/);
   return { version: verMatch?.[1] || "unknown", url, packageName: pkg.name };
+}
+
+function getWindowsPackageArch(packageName) {
+  const match = String(packageName || "").match(/_(x64|arm64|x86|neutral)(?:__|_|\.)/i);
+  return match ? match[1].toLowerCase() : "";
+}
+
+function selectWindowsX64Package(pkgs) {
+  const x64Pkgs = pkgs.filter((pkg) => getWindowsPackageArch(pkg.name) === "x64");
+  if (x64Pkgs.length === 0) {
+    const names = pkgs.map((pkg) => pkg.name).join(", ");
+    throw new Error(`No Windows x64 package found. Available packages: ${names || "(none)"}`);
+  }
+
+  const codexPkgs = x64Pkgs.filter((pkg) => /codex/i.test(pkg.name));
+  const candidates = codexPkgs.length > 0 ? codexPkgs : x64Pkgs;
+  return candidates.sort((a, b) => Number(b.size || 0) - Number(a.size || 0))[0];
+}
+
+function assertWindowsX64Resources(appDir, resourcesDir, packageName) {
+  const shellRuntimePath = path.join(appDir, "owl-shell-runtime.json");
+  if (!fs.existsSync(shellRuntimePath)) {
+    throw new Error("Windows: owl-shell-runtime.json not found; cannot verify package architecture");
+  }
+
+  const shellRuntime = JSON.parse(fs.readFileSync(shellRuntimePath, "utf-8"));
+  if (shellRuntime.platform !== "win32" || shellRuntime.arch !== "x64") {
+    throw new Error(
+      `Windows package architecture mismatch: selected ${packageName}, ` +
+      `but owl-shell-runtime.json says ${shellRuntime.platform}/${shellRuntime.arch}`
+    );
+  }
+
+  const electronAppPath = path.join(resourcesDir, "owl-electron-app.json");
+  if (fs.existsSync(electronAppPath)) {
+    const electronApp = JSON.parse(fs.readFileSync(electronAppPath, "utf-8"));
+    const packagedFrom = String(electronApp.packagedFrom || "");
+    if (/win32-arm64/i.test(packagedFrom)) {
+      throw new Error(`Windows package architecture mismatch: packagedFrom=${packagedFrom}`);
+    }
+  }
 }
 
 // ─── Extract macOS ──────────────────────────────────────────────
@@ -206,6 +247,7 @@ async function syncWin(destDir) {
     const alt = findFile(extractDir, "app.asar");
     throw new Error(`Windows: resources dir not found${alt ? `, app.asar at ${alt}` : ""}`);
   }
+  assertWindowsX64Resources(path.join(extractDir, "app"), resourcesDir, info.packageName);
 
   assembleOutput(resourcesDir, destDir, "Windows");
   return info;
