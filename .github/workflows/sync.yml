@@ -2,7 +2,7 @@ name: Sync Upstream & Patch
 
 on:
   schedule:
-    - cron: "0 8 * * *" # Daily 08:00 UTC
+    - cron: "30 0 * * *" # Daily 00:30 UTC = 08:30 Asia/Shanghai (UTC+8)
   workflow_dispatch:
     inputs:
       force:
@@ -266,6 +266,6 @@ jobs:
             artifacts/**/*.deb
             artifacts/**/*.rpm
             artifacts/**/*.exe
-          draft: true
+          draft: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
