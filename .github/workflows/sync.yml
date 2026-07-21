@@ -34,18 +34,34 @@ jobs:
       - name: Check upstream versions
         id: detect
         run: |
-          set +e
-          node scripts/check-update.js --json --force 2>&1
-          exit_code=$?
-          set -e
-
+          # Manual dispatch with force=true always builds.
           if [ "${{ inputs.force }}" = "true" ]; then
+            echo "Force build requested — skipping version check."
             echo "has_update=true" >> "$GITHUB_OUTPUT"
-          elif [ $exit_code -eq 0 ]; then
+            exit 0
+          fi
+
+          # --force here only makes the script always emit JSON (exit 0);
+          # the real "did it change?" comparison is done below against
+          # the last-built version recorded in package.json. This avoids
+          # relying on scripts/.versions.json, which is gitignored and
+          # therefore always empty in CI.
+          RESULT=$(node scripts/check-update.js --json --force)
+          UPSTREAM=$(echo "$RESULT" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{const p=JSON.parse(d).platforms||{};console.log(p['macOS-arm64']?.version||p['macOS-x64']?.version||p.Windows?.version||'')}catch{console.log('')}})")
+          CURRENT=$(node -e "console.log(require('./package.json').version)")
+
+          echo "Upstream latest : ${UPSTREAM:-<unknown>}"
+          echo "Current build   : ${CURRENT}"
+
+          if [ -z "$UPSTREAM" ]; then
+            echo "::warning::Could not determine upstream version; skipping build."
+            echo "has_update=false" >> "$GITHUB_OUTPUT"
+          elif [ "$UPSTREAM" != "$CURRENT" ]; then
+            echo "New upstream version detected → build."
             echo "has_update=true" >> "$GITHUB_OUTPUT"
           else
+            echo "Already up to date → skip build."
             echo "has_update=false" >> "$GITHUB_OUTPUT"
-            echo "No upstream update detected."
           fi
 
   # ──────────────────────────────────────────────
@@ -187,8 +203,8 @@ jobs:
   # Bump version + tag + release
   # ──────────────────────────────────────────────
   release:
-    needs: [build-mac, build-windows, build-linux]
-    if: always() && needs.check.result == 'success'
+    needs: [check, build-mac, build-windows, build-linux]
+    if: always() && needs.check.outputs.has_update == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
