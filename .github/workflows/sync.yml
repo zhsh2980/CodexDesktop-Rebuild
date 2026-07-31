@@ -163,6 +163,8 @@ jobs:
             echo "No version change — package.json already at ${VERSION}."
           else
             git commit -m "Bump version to ${VERSION}"
+            # master may have moved since checkout — rebase before pushing.
+            git pull --rebase origin master
             git push origin HEAD
           fi
 
