@@ -2,8 +2,8 @@ name: Build & Release (Manual)
 
 on:
   schedule:
-    # 东八区每天 08:30（UTC 00:30）
-    - cron: "30 0 * * *"
+    # 东八区每天 07:30（UTC 前一天 23:30）
+    - cron: "30 23 * * *"
   workflow_dispatch:
     inputs:
       platform:
