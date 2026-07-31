@@ -17,30 +17,30 @@ env:
   NODE_VERSION: "24"
 
 jobs:
-  build-mac:
-    if: github.event_name == 'schedule' || inputs.platform == 'all' || inputs.platform == 'mac'
-    runs-on: macos-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [x64, arm64]
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-      - run: |
-          npm ci
-      - run: |
-          brew install --quiet sevenzip
-      - run: node scripts/sync-upstream.js --force --skip-win
-      - run: node scripts/patch-all.js mac-${{ matrix.arch }}
-      - run: npm run build:mac-${{ matrix.arch }}
-      - uses: actions/upload-artifact@v7
-        with:
-          name: Codex-macOS-${{ matrix.arch }}
-          path: out/*.dmg
+  # build-mac:
+  #   if: github.event_name == 'schedule' || inputs.platform == 'all' || inputs.platform == 'mac'
+  #   runs-on: macos-latest
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       arch: [x64, arm64]
+  #   steps:
+  #     - uses: actions/checkout@v6
+  #     - uses: actions/setup-node@v6
+  #       with:
+  #         node-version: ${{ env.NODE_VERSION }}
+  #         cache: npm
+  #     - run: |
+  #         npm ci
+  #     - run: |
+  #         brew install --quiet sevenzip
+  #     - run: node scripts/sync-upstream.js --force --skip-win
+  #     - run: node scripts/patch-all.js mac-${{ matrix.arch }}
+  #     - run: npm run build:mac-${{ matrix.arch }}
+  #     - uses: actions/upload-artifact@v7
+  #       with:
+  #         name: Codex-macOS-${{ matrix.arch }}
+  #         path: out/*.dmg
 
   build-windows:
     if: github.event_name == 'schedule' || inputs.platform == 'all' || inputs.platform == 'windows'
@@ -67,31 +67,31 @@ jobs:
           name: Codex-Windows-x64
           path: out/*.zip
 
-  build-linux:
-    if: github.event_name == 'schedule' || inputs.platform == 'all' || inputs.platform == 'linux'
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [x64, arm64]
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-      - run: |
-          npm ci
-      - run: |
-          sudo apt-get update
-          sudo apt-get install -y rpm fakeroot dpkg 7zip
-      - run: node scripts/sync-upstream.js --force --skip-win
-      - run: node scripts/patch-all.js mac-${{ matrix.arch }}
-      - run: npm run build:linux-${{ matrix.arch }}
-      - uses: actions/upload-artifact@v7
-        with:
-          name: Codex-Linux-${{ matrix.arch }}
-          path: |
-            out/make/deb/**/*.deb
-            out/make/rpm/**/*.rpm
-            out/make/zip/**/*.zip
+  # build-linux:
+  #   if: github.event_name == 'schedule' || inputs.platform == 'all' || inputs.platform == 'linux'
+  #   runs-on: ubuntu-latest
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       arch: [x64, arm64]
+  #   steps:
+  #     - uses: actions/checkout@v6
+  #     - uses: actions/setup-node@v6
+  #       with:
+  #         node-version: ${{ env.NODE_VERSION }}
+  #         cache: npm
+  #     - run: |
+  #         npm ci
+  #     - run: |
+  #         sudo apt-get update
+  #         sudo apt-get install -y rpm fakeroot dpkg 7zip
+  #     - run: node scripts/sync-upstream.js --force --skip-win
+  #     - run: node scripts/patch-all.js mac-${{ matrix.arch }}
+  #     - run: npm run build:linux-${{ matrix.arch }}
+  #     - uses: actions/upload-artifact@v7
+  #       with:
+  #         name: Codex-Linux-${{ matrix.arch }}
+  #         path: |
+  #           out/make/deb/**/*.deb
+  #           out/make/rpm/**/*.rpm
+  #           out/make/zip/**/*.zip
