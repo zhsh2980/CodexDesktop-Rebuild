@@ -2,7 +2,7 @@ name: Sync Upstream & Patch
 
 on:
   schedule:
-    - cron: "30 0 * * *" # Daily 00:30 UTC = 08:30 Asia/Shanghai (UTC+8)
+    - cron: "30 23 * * *" # Daily 23:30 UTC = 07:30 Asia/Shanghai (UTC+8)
   workflow_dispatch:
     inputs:
       force:
@@ -46,8 +46,9 @@ jobs:
           # the last-built version recorded in package.json. This avoids
           # relying on scripts/.versions.json, which is gitignored and
           # therefore always empty in CI.
+          # Windows-only build → compare against the Windows upstream version.
           RESULT=$(node scripts/check-update.js --json --force)
-          UPSTREAM=$(echo "$RESULT" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{const p=JSON.parse(d).platforms||{};console.log(p['macOS-arm64']?.version||p['macOS-x64']?.version||p.Windows?.version||'')}catch{console.log('')}})")
+          UPSTREAM=$(echo "$RESULT" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{const p=JSON.parse(d).platforms||{};console.log(p.Windows?.version||'')}catch{console.log('')}})")
           CURRENT=$(node -e "console.log(require('./package.json').version)")
 
           echo "Upstream latest : ${UPSTREAM:-<unknown>}"
@@ -65,51 +66,11 @@ jobs:
           fi
 
   # ──────────────────────────────────────────────
-  # Each platform: sync + patch + build in one job
-  # (src/ is gitignored, so it must be generated per-runner)
+  # Windows only. mac/linux builds removed:
+  #   - build-mac: build-from-upstream.js looks for Codex.app but the
+  #     upstream ZIP ships ChatGPT.app — never built successfully.
+  #   - build-linux: better-sqlite3 fails to compile against Electron 42.
   # ──────────────────────────────────────────────
-  build-mac:
-    needs: check
-    if: needs.check.outputs.has_update == 'true'
-    runs-on: macos-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [x64, arm64]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-
-      - name: Install dependencies
-        run: |
-          npm ci
-
-      - name: Install tools
-        run: |
-          brew install --quiet sevenzip
-
-      - name: Sync upstream (macOS only)
-        run: node scripts/sync-upstream.js --force --skip-win
-
-      - name: Patch
-        run: node scripts/patch-all.js mac-${{ matrix.arch }}
-
-      - name: Build
-        run: npm run build:mac-${{ matrix.arch }}
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: Codex-macOS-${{ matrix.arch }}
-          path: out/*.dmg
-          if-no-files-found: error
-
   build-windows:
     needs: check
     if: needs.check.outputs.has_update == 'true'
@@ -153,58 +114,12 @@ jobs:
           path: out/*.zip
           if-no-files-found: error
 
-  build-linux:
-    needs: check
-    if: needs.check.outputs.has_update == 'true'
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [x64, arm64]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y rpm fakeroot dpkg 7zip
-
-      - name: Install dependencies
-        run: |
-          npm ci
-
-      - name: Sync upstream (macOS ZIP for unix, skip Windows)
-        run: node scripts/sync-upstream.js --force --skip-win
-
-      - name: Patch
-        run: node scripts/patch-all.js mac-${{ matrix.arch }}
-
-      - name: Build
-        run: npm run build:linux-${{ matrix.arch }}
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: Codex-Linux-${{ matrix.arch }}
-          path: |
-            out/make/deb/**/*.deb
-            out/make/rpm/**/*.rpm
-            out/make/zip/**/*.zip
-          if-no-files-found: error
-
   # ──────────────────────────────────────────────
   # Bump version + tag + release
   # ──────────────────────────────────────────────
   release:
-    needs: [check, build-mac, build-windows, build-linux]
-    if: always() && needs.check.outputs.has_update == 'true'
+    needs: [check, build-windows]
+    if: always() && needs.check.outputs.has_update == 'true' && needs.build-windows.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -226,14 +141,10 @@ jobs:
         id: version
         run: |
           RESULT=$(node scripts/check-update.js --json --force)
-          MAC_ARM64=$(echo "$RESULT" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{const j=JSON.parse(d);console.log(j.platforms?.['macOS-arm64']?.version||'')}catch{console.log('')}})")
-          MAC_X64=$(echo "$RESULT" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{const j=JSON.parse(d);console.log(j.platforms?.['macOS-x64']?.version||'')}catch{console.log('')}})")
           WIN_VER=$(echo "$RESULT" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{const j=JSON.parse(d);console.log(j.platforms?.Windows?.version||'')}catch{console.log('')}})")
 
-          VERSION="${MAC_ARM64:-${MAC_X64:-$WIN_VER}}"
+          VERSION="$WIN_VER"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "mac_arm64=$MAC_ARM64" >> "$GITHUB_OUTPUT"
-          echo "mac_x64=$MAC_X64" >> "$GITHUB_OUTPUT"
           echo "win_version=$WIN_VER" >> "$GITHUB_OUTPUT"
 
           if [ -z "$VERSION" ]; then echo "No version detected"; exit 0; fi
@@ -248,11 +159,20 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           git add package.json
-          git diff --cached --quiet && echo "No version change" && exit 0
+          if git diff --cached --quiet; then
+            echo "No version change — package.json already at ${VERSION}."
+          else
+            git commit -m "Bump version to ${VERSION}"
+            git push origin HEAD
+          fi
 
-          git commit -m "Bump version to ${VERSION}"
-          git tag -a "v${VERSION}" -m "Codex ${VERSION}"
-          git push origin HEAD --tags
+          # Re-runs must not fail on an existing tag.
+          if git ls-remote --exit-code --tags origin "v${VERSION}" >/dev/null 2>&1; then
+            echo "Tag v${VERSION} already exists — skipping tag creation."
+          else
+            git tag -a "v${VERSION}" -m "Codex ${VERSION}"
+            git push origin "v${VERSION}"
+          fi
 
       - name: Download all artifacts
         uses: actions/download-artifact@v7
@@ -272,16 +192,9 @@ jobs:
             ## Upstream Versions
             | Platform | Version |
             |----------|---------|
-            | macOS arm64 | `${{ steps.version.outputs.mac_arm64 || 'N/A' }}` |
-            | macOS x64 | `${{ steps.version.outputs.mac_x64 || 'N/A' }}` |
             | Windows x64 | `${{ steps.version.outputs.win_version || 'N/A' }}` |
-            | Linux | uses macOS ASAR |
           files: |
-            artifacts/**/*.dmg
             artifacts/**/*.zip
-            artifacts/**/*.deb
-            artifacts/**/*.rpm
-            artifacts/**/*.exe
           draft: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
