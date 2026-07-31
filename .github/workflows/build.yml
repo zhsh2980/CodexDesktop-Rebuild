@@ -1,9 +1,7 @@
 name: Build & Release (Manual)
 
 on:
-  schedule:
-    # 东八区每天 07:30（UTC 前一天 23:30）
-    - cron: "30 23 * * *"
+  # 定时构建由 sync.yml 负责（每天东八区 07:30），此处仅保留手动触发
   workflow_dispatch:
     inputs:
       platform:
@@ -43,7 +41,7 @@ jobs:
   #         path: out/*.dmg
 
   build-windows:
-    if: github.event_name == 'schedule' || inputs.platform == 'all' || inputs.platform == 'windows'
+    if: inputs.platform == 'all' || inputs.platform == 'windows'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
