@@ -101,6 +101,20 @@ jobs:
       - name: Sync upstream (Windows only)
         run: node scripts/sync-upstream.js --force --skip-mac
 
+      # Name the build output after the upstream Windows version being
+      # packaged, not the version recorded by the previous release.
+      - name: Align package version with upstream
+        shell: bash
+        run: |
+          RESULT=$(node scripts/check-update.js --json --force)
+          VER=$(echo "$RESULT" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{console.log(JSON.parse(d).platforms?.Windows?.version||'')}catch{console.log('')}})")
+          if [ -n "$VER" ]; then
+            node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.version='$VER';fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n');"
+            echo "package.json version -> $VER"
+          else
+            echo "::warning::Could not resolve upstream Windows version; keeping $(node -e "console.log(require('./package.json').version)")"
+          fi
+
       - name: Patch
         run: node scripts/patch-all.js win
 
