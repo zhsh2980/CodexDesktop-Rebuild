@@ -1,6 +1,9 @@
 name: Build & Release (Manual)
 
 on:
+  schedule:
+    # 东八区每天 08:30（UTC 00:30）
+    - cron: "30 0 * * *"
   workflow_dispatch:
     inputs:
       platform:
@@ -15,7 +18,7 @@ env:
 
 jobs:
   build-mac:
-    if: inputs.platform == 'all' || inputs.platform == 'mac'
+    if: github.event_name == 'schedule' || inputs.platform == 'all' || inputs.platform == 'mac'
     runs-on: macos-latest
     strategy:
       fail-fast: false
@@ -40,7 +43,7 @@ jobs:
           path: out/*.dmg
 
   build-windows:
-    if: inputs.platform == 'all' || inputs.platform == 'windows'
+    if: github.event_name == 'schedule' || inputs.platform == 'all' || inputs.platform == 'windows'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
@@ -65,7 +68,7 @@ jobs:
           path: out/*.zip
 
   build-linux:
-    if: inputs.platform == 'all' || inputs.platform == 'linux'
+    if: github.event_name == 'schedule' || inputs.platform == 'all' || inputs.platform == 'linux'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
