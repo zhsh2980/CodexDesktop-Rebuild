@@ -10,16 +10,17 @@ on:
         type: boolean
         default: false
       cli:
-        # 默认 auto：官方 CLI 通常比 @cometix/codex 新，强行替换会让应用
-        # 提示「codex cli 版本太旧」。
+        # 默认 official：始终随包发布与应用配套的官方 CLI。
+        # 不再默认 auto —— 官方 CLI 常是 alpha 预发布版，cometix 一出同号正式版，
+        # auto 就会按版本号规则把官方 CLI 换掉（2026-09-23 发生过一次）。
         # 注意：「删除已归档会话」现在由应用本体自带，**不需要 cometix，也
         # 不需要任何补丁**；它只要求 CLI 的 app-server 支持 thread/delete，
         # 官方自 0.15x 起已内置（构建时会检测并记进 BUILD-INFO）。
         # cometix 仅在想要它额外的 TUI 定制功能时才选。
-        description: "Which codex CLI to ship (auto = keep official unless cometix is newer)"
+        description: "Which codex CLI to ship (official = always ship the official CLI bundled with the app)"
         type: choice
-        options: [auto, official, cometix]
-        default: auto
+        options: [official, auto, cometix]
+        default: official
 
 env:
   NODE_VERSION: "24"
@@ -127,16 +128,16 @@ jobs:
           fi
 
       # CODEX_CLI 被 scripts/lib/cli-policy.js 读取。定时触发时 inputs 为空，
-      # 会落到 'auto'。
+      # 会落到 'official'。
       - name: Patch
         run: node scripts/patch-all.js win
         env:
-          CODEX_CLI: ${{ inputs.cli || 'auto' }}
+          CODEX_CLI: ${{ inputs.cli || 'official' }}
 
       - name: Build
         run: npm run build:win-x64
         env:
-          CODEX_CLI: ${{ inputs.cli || 'auto' }}
+          CODEX_CLI: ${{ inputs.cli || 'official' }}
 
       # 构建后自检闸门：路径编码、与官方参照一致性、computer use、
       # CLI 可运行、官方二进制签名、app.asar 可读，外加 --smoke 真的
@@ -145,7 +146,7 @@ jobs:
       - name: Verify portable build
         run: node scripts/verify-portable.js out/win/Codex-win32-x64 --reference "$env:TEMP\codex-sync\win-extract\app" --cli $env:CODEX_CLI --smoke --report out/verify-report.json
         env:
-          CODEX_CLI: ${{ inputs.cli || 'auto' }}
+          CODEX_CLI: ${{ inputs.cli || 'official' }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7

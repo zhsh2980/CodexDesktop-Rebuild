@@ -7,12 +7,18 @@
  * 最新只有 0.154.0-cometix，于是应用弹出「codex cli 版本太旧」；而
  * `thread/delete` 官方自 0.15x 起早已内置，这个理由也不成立了。
  *
- * 现在的策略：
- *   official  始终保留官方 CLI
+ * 现在的策略（默认 official）：
+ *   official  始终保留官方 CLI（默认；定时构建也用它）
  *   cometix   强制替换为 @cometix/codex
  *   auto      仅当 cometix 数字三元组 严格大于 官方，
  *             或 三元组相等且官方带预发布标记 时才用 cometix；
  *             其余情况（含查询失败）一律用官方。
+ *
+ * 为什么默认不再是 auto：官方随应用发布的 CLI 常常是 alpha 预发布版，
+ * cometix 一发同号的正式版（比如 0.155.0-cometix 对 0.155.0-alpha.16），
+ * 按版本号规则它就「更新」，auto 就会悄悄把官方 CLI 换掉 —— 2026-09-23
+ * 的一次构建就是这样发出了第三方 CLI。应用和它自带的官方 CLI 是配套测试的，
+ * 所以默认始终用官方；想要 cometix 请手动选择。
  *
  * 决定会写进 src/<platform>/.cli-choice.json，供 patch-all 与
  * build-from-upstream 共享。
@@ -29,7 +35,7 @@ const THREAD_DELETE = "thread/delete";
 // ─── 参数解析 ────────────────────────────────────────────────────
 
 /**
- * 从命令行参数 / 环境变量解析 CLI 模式，默认 auto。
+ * 从命令行参数 / 环境变量解析 CLI 模式，默认 official。
  */
 function parseCliMode(argv = process.argv.slice(2), env = process.env) {
   const idx = argv.indexOf("--cli");
@@ -39,12 +45,12 @@ function parseCliMode(argv = process.argv.slice(2), env = process.env) {
     if (inline) mode = inline.slice("--cli=".length);
   }
   if (!mode) mode = env.CODEX_CLI;
-  if (!mode) return "auto";
+  if (!mode) return "official";
 
   mode = String(mode).trim().toLowerCase();
   if (!MODES.includes(mode)) {
-    console.log(`  [!] 未知 CLI 模式 "${mode}"，回退到 auto`);
-    return "auto";
+    console.log(`  [!] 未知 CLI 模式 "${mode}"，回退到 official`);
+    return "official";
   }
   return mode;
 }
