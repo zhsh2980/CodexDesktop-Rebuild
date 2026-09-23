@@ -1,0 +1,5 @@
+# 安装脚本会被原样打进发布的 zip，在用户的 Windows 上由 cmd.exe / Windows PowerShell 5.1 执行。
+# cmd.exe 对 LF 换行的批处理处理不可靠，所以不管在哪台机器、用什么 git 配置检出，这两类文件一律用 CRLF。
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf

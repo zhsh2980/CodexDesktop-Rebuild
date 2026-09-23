@@ -9,6 +9,17 @@ on:
         description: "Force sync even without version change"
         type: boolean
         default: false
+      cli:
+        # 默认 auto：官方 CLI 通常比 @cometix/codex 新，强行替换会让应用
+        # 提示「codex cli 版本太旧」。
+        # 注意：「删除已归档会话」现在由应用本体自带，**不需要 cometix，也
+        # 不需要任何补丁**；它只要求 CLI 的 app-server 支持 thread/delete，
+        # 官方自 0.15x 起已内置（构建时会检测并记进 BUILD-INFO）。
+        # cometix 仅在想要它额外的 TUI 定制功能时才选。
+        description: "Which codex CLI to ship (auto = keep official unless cometix is newer)"
+        type: choice
+        options: [auto, official, cometix]
+        default: auto
 
 env:
   NODE_VERSION: "24"
@@ -115,17 +126,35 @@ jobs:
             echo "::warning::Could not resolve upstream Windows version; keeping $(node -e "console.log(require('./package.json').version)")"
           fi
 
+      # CODEX_CLI 被 scripts/lib/cli-policy.js 读取。定时触发时 inputs 为空，
+      # 会落到 'auto'。
       - name: Patch
         run: node scripts/patch-all.js win
+        env:
+          CODEX_CLI: ${{ inputs.cli || 'auto' }}
 
       - name: Build
         run: npm run build:win-x64
+        env:
+          CODEX_CLI: ${{ inputs.cli || 'auto' }}
+
+      # 构建后自检闸门：路径编码、与官方参照一致性、computer use、
+      # CLI 可运行、官方二进制签名、app.asar 可读，外加 --smoke 真的
+      # 启动一次应用（26.915 的「没有程序包标识符」只有启动才发现得了）。
+      # 任一致命项失败就让整个 job 红掉，绝不发布坏包。
+      - name: Verify portable build
+        run: node scripts/verify-portable.js out/win/Codex-win32-x64 --reference "$env:TEMP\codex-sync\win-extract\app" --cli $env:CODEX_CLI --smoke --report out/verify-report.json
+        env:
+          CODEX_CLI: ${{ inputs.cli || 'auto' }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
           name: Codex-Windows-x64
-          path: out/*.zip
+          path: |
+            out/*.zip
+            out/SHA256SUMS.txt
+            out/verify-report.json
           if-no-files-found: error
 
   # ──────────────────────────────────────────────
@@ -209,8 +238,19 @@ jobs:
             | Platform | Version |
             |----------|---------|
             | Windows x64 | `${{ steps.version.outputs.win_version || 'N/A' }}` |
+
+            ## 使用方法
+            下载 zip，解压后双击 `Install-Codex.cmd`（不需要管理员）。每个版本装进自己的文件夹，升级不会覆盖旧版本；之后可用开始菜单里的「更新 Codex」升级。详见 README。
+
+            ## 这个包做了什么
+            - 由官方 Microsoft Store 软件包（MSIX）展开而成，官方 exe/dll 保留 OpenAI 数字签名；包内 `%40oai` 等编码路径已全部还原（Computer Use 依赖它）。
+            - 随包的 `resources\codex.exe` 默认是与应用同版本的官方 CLI。
+            - `codexWindowsAppContainedCore` 已置为 `"0"`，免安装版无需 MSIX 程序包标识即可启动。
+            - 发布前的自检结果见 `verify-report.json`（路径编码、与官方逐文件比对、Computer Use 加载、CLI、数字签名、asar、启动冒烟测试）；构建信息见包内 `BUILD-INFO.json`。
           files: |
             artifacts/**/*.zip
+            artifacts/**/SHA256SUMS.txt
+            artifacts/**/verify-report.json
           draft: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
