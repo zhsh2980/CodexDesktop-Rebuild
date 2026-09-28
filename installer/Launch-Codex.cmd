@@ -1,21 +1,26 @@
 @echo off
 REM ---------------------------------------------------------------
-REM  Launch-Codex.cmd - fallback launcher for the portable build
+REM  Launch-Codex.cmd - unzip-and-run launcher for the portable build
 REM
-REM  You normally do NOT need this. Just run ChatGPT.exe.
-REM
-REM  Use this only if starting ChatGPT.exe fails with
+REM  This is the official "no install, just run" entry point. The
+REM  files in this zip (ChatGPT.exe, resources\app.asar, etc.) are
+REM  byte-for-byte identical to the official Microsoft Store package,
+REM  unmodified. A plain unzipped copy has no Windows "package
+REM  identity" though, and the app refuses to start without one:
 REM      "ChatGPT failed to start."
 REM      "The process has no package identity."
 REM  (the message may appear localized, e.g. in Chinese)
 REM
-REM  Why it helps: since 26.915 the app asks Windows for a package
-REM  identity when app.asar/package.json has
-REM      "codexWindowsAppContainedCore": "1"
-REM  A portable (unzipped) copy has no package identity, so startup
-REM  fails. Our build flips that flag to "0". If a future build ever
-REM  misses it, setting CODEX_CLI_PATH also disables that check,
-REM  which is exactly what this script does.
+REM  Why this script helps: at startup, the app only requires a
+REM  package identity when the CODEX_CLI_PATH environment variable is
+REM  empty. This script sets it (pointing at the bundled codex.exe)
+REM  and then starts ChatGPT.exe, which skips that check. No file in
+REM  the package is modified.
+REM
+REM  If you used Install-Codex.cmd instead, it already sets this
+REM  variable for your user account (see HKCU\Environment), so
+REM  double-clicking ChatGPT.exe directly also works afterwards -
+REM  this script is only needed when running straight out of the zip.
 REM ---------------------------------------------------------------
 
 set "CODEX_CLI_PATH=%~dp0resources\codex.exe"

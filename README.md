@@ -8,10 +8,10 @@ OpenAI Codex 桌面应用（Electron）的社区重打包版本。Windows 版每
 
 ## 这是什么
 
-- 内容来自 OpenAI 官方发布的 Codex 桌面应用 MSIX 商店包，重新打包成普通目录（`ChatGPT.exe`、`Codex.exe`、`resources/` 等），并打了若干补丁（详见每个发布里的 `BUILD-INFO.json` 和构建日志）。
+- 内容来自 OpenAI 官方发布的 Codex 桌面应用 MSIX 商店包，原样展开成普通目录（`ChatGPT.exe`、`Codex.exe`、`resources/` 等）。**包里的每一个文件都和 MSIX 商店包字节一致，没有打任何补丁**：不改 `app.asar`，不改任何 `.exe`/`.dll`，全部保留 OpenAI 的官方数字签名。
+- 免安装启动靠的是安装脚本给当前用户设置一个环境变量（`CODEX_CLI_PATH`），而不是修改应用文件本身——原理见下文「免安装版是怎么在没有『程序包标识』的情况下运行的」。
 - 目标是「**下载即用，体验和商店安装的一样**」，同时适合没有商店、没有管理员权限的公司电脑。
-- 压缩包里官方的 exe/dll 保留原有的 OpenAI 数字签名；应用本体没有被重新编译。
-- 和商店版的关系：这是同一个应用，只是分发方式不同。两者可以并存，但用户数据目录相同（见下文），不建议同时运行。
+- 和商店版的关系：这是同一个应用、同一份官方文件，只是分发方式不同。两者可以并存，但用户数据目录相同（见下文），不建议同时运行。
 
 ## 安装（三步，不需要管理员）
 
@@ -23,6 +23,7 @@ OpenAI Codex 桌面应用（Electron）的社区重打包版本。Windows 版每
 
 - 在**安装根目录**（默认 `%LOCALAPPDATA%\Programs\CodexApp`）下为这个版本单独建一个文件夹 `Codex-win-x64-<应用版本>`（例如 `Codex-win-x64-26.917.51856`），把程序复制进去——**每个版本各占一个文件夹，互不覆盖**，升级不会动旧版本文件夹；
 - 创建/切换开始菜单和桌面的 `Codex` 快捷方式指向这个版本，并创建/切换开始菜单里的「更新 Codex」；如果你之前已经把 `ChatGPT.exe` 或 `Codex.lnk` 固定到了任务栏，也会**原地**把那个固定项改指向新版本（不会新增固定项）；
+- 把当前用户的环境变量 `CODEX_CLI_PATH` 设为这个版本的 `resources\codex.exe`（写在 `HKCU\Environment`，只影响你自己的账户，不需要管理员）——这是免安装版能在没有 Windows「程序包标识」的情况下启动的关键，详见下文；
 - 在「设置 → 应用 → 已安装的应用」里登记一个 `Codex` 卸载项（只写当前用户的注册表，不写 HKLM、不装服务）；
 - 安装完成后自动做一次自检（关键文件、异常路径、`codex.exe --version`），**通过后才会切换快捷方式**；不通过就自动回滚（只删除本次新建的文件夹，其它版本和快捷方式都不受影响），然后启动应用。
 
@@ -42,6 +43,8 @@ OpenAI Codex 桌面应用（Electron）的社区重打包版本。Windows 版每
 | `-CleanOld` | 安装成功后删除**本工具安装、有标记、版本比这次低、当前没有进程在跑、也没有快捷方式指向它**的旧版本文件夹（默认关闭；没有标记的文件夹永远不会被删） |
 | `-CleanStale` | 清理旧版本遗留的**无效**注册表项和快捷方式（见下文「清理旧版本残留」） |
 | `-SkipRegistry` | 不写「已安装的应用」卸载项 |
+| `-SkipEnv` | 不设置环境变量 `CODEX_CLI_PATH`（这种情况下直接双击 `ChatGPT.exe` 可能会提示没有程序包标识符，需要改用 `Launch-Codex.cmd`） |
+| `-KeepEnv` | 如果 `CODEX_CLI_PATH` 当前指向本安装根目录**以外**的路径（说明是你自己设置的），保留原值不覆盖；不加这个参数时，安装脚本会打印提示后直接覆盖成这次安装的版本 |
 
 ## 更新
 
@@ -73,6 +76,7 @@ OpenAI Codex 桌面应用（Electron）的社区重打包版本。Windows 版每
   ```
 
 - 会关闭安装根目录下所有版本正在运行的实例，删除指向安装根目录的开始菜单/桌面/任务栏快捷方式和卸载项，以及安装根目录下**所有带安装标记**的版本文件夹（没有标记的文件夹——比如你自己手动放的东西——永远不会被删）。加 `-KeepFiles` 只清理快捷方式和卸载项，保留所有版本文件夹。
+- 如果环境变量 `CODEX_CLI_PATH` 当前指向本安装根目录下的某个版本，卸载时会一并删除；如果它指向别处（比如你自己设置过），会保留不动。
 - **不会删除用户数据**：`%APPDATA%\Codex`、`%USERPROFILE%\.codex` 这两个目录任何情况下都不会被卸载脚本触碰，需要清空账号/配置请自行手动删除。
 
 ## 和商店安装版的区别（如实说明）
@@ -103,28 +107,47 @@ OpenAI Codex 桌面应用（Electron）的社区重打包版本。Windows 版每
 
 ## 免安装版是怎么在没有「程序包标识」的情况下运行的
 
-从商店安装的 MSIX 应用有 Windows 的「程序包标识」（package identity），而解压出来直接运行的免安装版没有。官方 **26.915 起**在 `app.asar/package.json` 里新增了一个开关：
+从商店安装的 MSIX 应用有 Windows 的「程序包标识」（package identity），而解压出来直接运行的免安装版没有。官方 **26.915 起**在 `app.asar/package.json` 里加了一个开关：
 
 ```json
 "codexWindowsAppContainedCore": "1"
 ```
 
-它为 `"1"` 时，应用启动早期（`bootstrap-import-main` 阶段）会去向系统要包标识，免安装版拿不到，于是直接弹
+应用启动早期（`bootstrap-import-main` 阶段）有一个门函数，大致等价于：
+
+```js
+win32 && isPackaged && resourcesPath
+  && !process.env.CODEX_CLI_PATH?.trim()
+  && codexWindowsAppContainedCore === "1"
+```
+
+四个条件同时成立才会去向系统要包标识，免安装版没有包标识，于是直接弹
 
 > ChatGPT failed to start. 该进程没有程序包标识符。
 
 日志里对应 `error Desktop bootstrap failed to start the main app`。26.908 及更早的版本没有这个键，所以当时免安装版能正常跑。
 
-**本仓库的处理**：构建时由 `scripts/patch-portable-mode.js` 把这个值改成 `"0"`（纯 JSON 数据改动，不碰压缩后的代码，也不改任何官方二进制）。
+**早期的做法（本仓库 26.917 及更早的构建）**：把 `app.asar` 里这个值改成 `"0"`，绕开门函数的第四个条件。这需要重新打包 `app.asar`，并把 `app.asar` 头的新哈希写回可执行文件（当时的运行时没有对这个头做完整性校验，改了也能正常启动）。
 
-**万一将来官方换了机制**：CI 的构建后自检带 `--smoke`，会在隔离环境里真的启动一次应用并读日志；起不来就让整个构建失败，而不是把坏包发出去。
+**现在的做法（本仓库 26.924 起的构建）**：改成让门函数的第二个条件不成立——**在启动前设置环境变量 `CODEX_CLI_PATH`**，指向随包的 `resources\codex.exe`。`Install-Codex.cmd` 会在安装完成后把它写进当前用户的环境变量（`HKCU\Environment`）；不想安装、直接解压运行的话，双击 `Launch-Codex.cmd` 也会达到同样效果。**这个办法完全不需要改动 `app.asar` 或任何官方二进制**，因为压根不会碰到 `codexWindowsAppContainedCore` 这个条件。
 
-作为兜底，压缩包里还附了 `Launch-Codex.cmd`：它设置 `CODEX_CLI_PATH` 后再启动（该环境变量非空同样会跳过包标识检查）。**正常情况下不需要用它。**
+**为什么不能再像以前那样改 `app.asar` 了**：官方从 **26.924 起**给运行时加上了 Electron 的 asar 完整性校验——`chrome.dll` 里的 fuse `EnableEmbeddedAsarIntegrityValidation` 被置为 `1`，且 `ChatGPT.exe` 里内嵌了官方 `app.asar` 头的 SHA-256。只要 `app.asar` 被改动一个字节，头哈希就会变，和内嵌值对不上，启动时会直接
+
+> FATAL:... Integrity check failed for asar archive
+
+崩溃退出（这不是「没有包标识」那种可以恢复的错误，是硬崩溃）。理论上可以像补丁开关一样把内嵌哈希也改掉，但那样会破坏 `ChatGPT.exe` 自身的 Authenticode 签名（变成 `HashMismatch`）——本仓库选择保持所有官方文件的签名有效，所以不再修改 `app.asar`，构建脚本默认也不再对它打任何补丁（见下文「开发者」一节的 `PATCH_ASAR` 开关）。
+
+**构建后怎么确认这套机制真的有效**：CI 的构建后自检带 `--smoke`，会按用户实际的启动方式（设置 `CODEX_CLI_PATH` 再启动 `ChatGPT.exe`）在隔离环境里真的启动一次应用并读日志；起不来（或者读到 `Integrity check failed`）就让整个构建失败，而不是把坏包发出去。
 
 ## 常见问题
 
 **启动时提示「该进程没有程序包标识符」/ "The process has no package identity"？**
-正常构建的包不该出现这个提示（构建时已处理，见上一节）。万一遇到，先试压缩包根目录里的 `Launch-Codex.cmd`；如果它能起来，说明该次构建的 `codexWindowsAppContainedCore` 没被正确置 0，请到仓库提 issue 并附上 `BUILD-INFO.json`。
+说明启动 `ChatGPT.exe` 的这个进程没有拿到 `CODEX_CLI_PATH` 环境变量（见上一节）。最常见的原因和解决办法：
+
+- **直接从解压出来的文件夹双击 `ChatGPT.exe`**：这样启动不会经过任何设置环境变量的步骤。请改为运行 `Install-Codex.cmd`（推荐，装完以后双击 `ChatGPT.exe` 也能正常启动），或者双击同目录下的 `Launch-Codex.cmd`（不安装，仅本次启动生效）。
+- **已经运行过 `Install-Codex.cmd`，但还是提示没有包标识**：多半是当前登录会话还没感知到新写入的环境变量。注销重新登录一次（或者重启资源管理器）通常就能解决；也可以先用 `Launch-Codex.cmd` 应急启动。
+- **之前手动设置过 `CODEX_CLI_PATH` 指向别的地方**：安装脚本发现这种情况会打印提示，默认覆盖成这次安装的版本；如果你确认不想被覆盖，装的时候加 `-KeepEnv`。可以在「编辑账户的环境变量」里检查这个变量当前的值。
+- 以上都试过仍不行，请到仓库提 issue 并附上 `BUILD-INFO.json`。
 
 **双击 `Install-Codex.cmd` 出现 SmartScreen（蓝色「Windows 已保护你的电脑」）提示？**
 zip 里官方的 exe 保留 OpenAI 数字签名；`.ps1` 脚本是**未签名**的，因此由 `.cmd` 以 `-ExecutionPolicy Bypass` 方式调用（不需要改系统执行策略）。如果下载的 zip 带有「来自 Internet」标记，可以在解压前右键 zip →「属性」→ 勾选「解除锁定」，或在弹出的提示里点「更多信息 → 仍要运行」。
@@ -220,7 +243,14 @@ npm run dev
 - 脚本依赖 `BUILD-INFO.json` 里的字段（都可缺失，缺失时容错为空）：`version`（=应用版本，兼容旧字段）、`appVersion`（app.asar 版本，用于决定版本文件夹名，缺失时依次回退 `version`、`msixVersion`）、`msixVersion`（商店包版本）、`zipName`、`cli.used`。
 - `update.ps1` 把安装根目录下带标记、`appVersion` 最高的文件夹当作"当前版本"，优先用它的 `releaseTag`（其次 `msixVersion`）与最新发布 tag 比较。
 - `update.ps1` 通过 `releases/latest` 的 302 得到 tag，再读 `releases/expanded_assets/<tag>` 得到真实的 zip 文件名（tag 是商店包版本，zip 名是应用版本，不能互相拼），两条都失败才回退到 GitHub API。
-- 所有脚本参数都可以指向临时目录/临时注册表键（`-InstallRoot`、`-StartMenuDir`、`-DesktopDir`、`-TaskbarDir`、`-RegistryRoot`、`-ClassesRoot`、`-BaseUrl`、`-ApiUrl` 等），便于在不污染真实环境的前提下测试；`update.ps1` 的旧参数 `-InstallDir` 仍保留作兼容别名。
+- 所有脚本参数都可以指向临时目录/临时注册表键（`-InstallRoot`、`-StartMenuDir`、`-DesktopDir`、`-TaskbarDir`、`-RegistryRoot`、`-ClassesRoot`、`-EnvKey`、`-BaseUrl`、`-ApiUrl` 等），便于在不污染真实环境的前提下测试；`update.ps1` 的旧参数 `-InstallDir` 仍保留作兼容别名。
+- `install.ps1` 会把当前用户的 `CODEX_CLI_PATH` 写进 `-EnvKey`（默认 `HKCU:\Environment`）；`uninstall.ps1` 只删除"确实指向本安装根目录"的值，指向别处的一律保留。测试时把 `-EnvKey` 指向一个专用的测试注册表键，不要用默认值。
+
+### app.asar 补丁与 `PATCH_ASAR` 开关
+
+- **默认不打任何补丁**：`scripts/patch-all.js` 默认会把全部 7 个补丁（`patch-portable-mode`、`patch-i18n`、`patch-copyright`、`patch-devtools`、`patch-fast-mode`、`patch-plugin-auth`、`patch-updater`）记为 `skipped`，`scripts/build-from-upstream.js` 也不会重新打包 `app.asar`、不会改动任何 `.exe`/`.dll`——产物里的这些文件就是 MSIX 里的官方文件，字节不变。原因见上文「免安装版是怎么在没有『程序包标识』的情况下运行的」：26.924 起的 asar 完整性校验容不下任何改动。
+- **`PATCH_ASAR=1`（或 `--patch-asar`）**：这是留给"未来某个不做 asar 完整性校验的运行时"的逃生舱，**不是**绕过当前校验的手段。打开这个开关后，`patch-all.js` 会先用 `scripts/lib/asar-integrity.js` 检测当前源（`src/win` 和 sync 缓存的 MSIX 解压目录）是否已经启用了完整性校验（读 `chrome.dll` 的 Electron fuse `EnableEmbeddedAsarIntegrityValidation`，以及 `ChatGPT.exe` 里是否内嵌了 asar 头哈希的 JSON）；只要检测到已启用，无论开关是否打开，都会直接报错拒绝，不会打任何补丁。
+- 检测结果和补丁是否真的生效，都会写进 `src/win/.patch-report.json`（`patchAsarRequested`、`asarModified`、`integrityCheck`）和构建产物根目录的 `BUILD-INFO.json`（`asarModified`、`launch`、`asarIntegrityEnforced`）。`verify-portable.js` 的 B 项（与官方参照一致）会据此决定 `app.asar` 是否也要逐字节比对：`asarModified=false` 时连 `app.asar` 也必须和官方完全一致。
 
 ### CI/CD
 

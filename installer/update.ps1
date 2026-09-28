@@ -26,7 +26,7 @@
 .PARAMETER BaseUrl       网站根地址，默认 https://github.com（一般不用改，测试用）
 .PARAMETER ApiUrl        API 根地址，默认 https://api.github.com（一般不用改，测试用）
 .PARAMETER WorkDir       下载与解压的工作目录，默认 %TEMP%\CodexUpdate
-.PARAMETER StartMenuDir / DesktopDir / TaskbarDir / RegistryRoot / NoDesktopShortcut / SkipRegistry
+.PARAMETER StartMenuDir / DesktopDir / TaskbarDir / RegistryRoot / EnvKey / NoDesktopShortcut / SkipRegistry / SkipEnv
                  只有显式指定时才原样转交给 install.ps1（默认值与 install.ps1 相同，一般不用指定，测试用）
 #>
 [CmdletBinding()]
@@ -47,8 +47,10 @@ param(
     [string]$DesktopDir,
     [string]$TaskbarDir,
     [string]$RegistryRoot,
+    [string]$EnvKey,
     [switch]$NoDesktopShortcut,
-    [switch]$SkipRegistry
+    [switch]$SkipRegistry,
+    [switch]$SkipEnv
 )
 
 $ErrorActionPreference = 'Stop'
@@ -756,8 +758,10 @@ function Start-CodexUpdate {
         if ($script:BoundParams.ContainsKey('DesktopDir')) { $installArgs += @('-DesktopDir', $DesktopDir) }
         if ($script:BoundParams.ContainsKey('TaskbarDir')) { $installArgs += @('-TaskbarDir', $TaskbarDir) }
         if ($script:BoundParams.ContainsKey('RegistryRoot')) { $installArgs += @('-RegistryRoot', $RegistryRoot) }
+        if ($script:BoundParams.ContainsKey('EnvKey')) { $installArgs += @('-EnvKey', $EnvKey) }
         if ($NoDesktopShortcut) { $installArgs += '-NoDesktopShortcut' }
         if ($SkipRegistry) { $installArgs += '-SkipRegistry' }
+        if ($SkipEnv) { $installArgs += '-SkipEnv' }
         if ($CleanOld) { $installArgs += '-CleanOld' }
         & $psExe @installArgs
         if ($LASTEXITCODE -ne 0) {

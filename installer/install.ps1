@@ -35,6 +35,9 @@
 .PARAMETER CleanOld         安装成功后删除 root 下"有标记、版本更低、无进程占用、无快捷方式引用"的旧版本文件夹（默认关闭）
 .PARAMETER Yes              所有询问都视为"是"（包括关闭正在运行的实例）
 .PARAMETER ReleaseTag       本次安装对应的 GitHub 发布 tag（如 v26.915.4065.0），由 update.ps1 传入，写进 .codexupdater-installed.json
+.PARAMETER EnvKey           写 CODEX_CLI_PATH 的注册表位置，默认 HKCU:\Environment（当前用户的"环境变量"）；测试时可指向别处
+.PARAMETER SkipEnv          不设置 CODEX_CLI_PATH（也不会在结尾启动时临时设置它）
+.PARAMETER KeepEnv          如果 CODEX_CLI_PATH 当前指向本安装根目录以外的路径（说明是你自己设的），保留原值不覆盖
 #>
 [CmdletBinding()]
 param(
@@ -55,7 +58,10 @@ param(
     [switch]$CleanStale,
     [switch]$CleanOld,
     [switch]$Yes,
-    [string]$ReleaseTag
+    [string]$ReleaseTag,
+    [string]$EnvKey = 'HKCU:\Environment',
+    [switch]$SkipEnv,
+    [switch]$KeepEnv
 )
 
 $ErrorActionPreference = 'Stop'
@@ -213,6 +219,78 @@ function New-Shortcut([string]$LnkPath, [string]$Target, [string]$WorkDir, [stri
 function Get-ShortcutTarget([string]$LnkPath) {
     $ws = New-Object -ComObject WScript.Shell
     try { return $ws.CreateShortcut($LnkPath).TargetPath } finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($ws) }
+}
+
+# 广播 WM_SETTINGCHANGE(lParam="Environment")，让资源管理器等已经在跑的进程
+# 尽快感知到环境变量变化（新开的进程本来就会重新读注册表，不依赖这个广播；
+# 它主要是为了让"开始菜单搜索"新建的进程、以及部分长驻的外壳组件更快生效）。
+function Send-EnvironmentChangeBroadcast {
+    try {
+        if (-not ('CodexInstaller.NativeMethods' -as [type])) {
+            Add-Type -Namespace CodexInstaller -Name NativeMethods -MemberDefinition '
+                [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+                public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+            '
+        }
+        $HWND_BROADCAST = [IntPtr]0xffff
+        $WM_SETTINGCHANGE = 0x1A
+        $SMTO_ABORTIFHUNG = 0x2
+        $result = [UIntPtr]::Zero
+        [void][CodexInstaller.NativeMethods]::SendMessageTimeout($HWND_BROADCAST, $WM_SETTINGCHANGE, [UIntPtr]::Zero, 'Environment', $SMTO_ABORTIFHUNG, 5000, [ref]$result)
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+# 把当前用户的 CODEX_CLI_PATH 设成 <targetDir>\resources\codex.exe。
+#
+# 为什么需要它：免安装版没有 Windows 的"程序包标识"（MSIX 安装才有），
+# 而应用 bootstrap 阶段的一个门函数在 win32+isPackaged+resourcesPath 都成立、
+# 且 CODEX_CLI_PATH 为空时，会去问系统要包标识，没有就直接崩溃退出
+# （"该进程没有程序包标识符"）。只要这个环境变量非空，就会跳过这次检查——
+# 不需要改动 app.asar 里的任何内容。设置成当前用户范围（HKCU），不需要管理员权限。
+function Set-CodexCliPathEnv([string]$EnvKeyPath, [string]$CliExePath, [string]$InstallRootPath) {
+    # 返回值是"这次操作结束后，CODEX_CLI_PATH 实际生效的值"（可能是我们刚写入的新值，
+    # 也可能是 -KeepEnv 保留下来的旧值），调用方用它来决定本次启动/摘要显示什么，
+    # 而不是想当然地认为一定被改成了 $CliExePath。$null 表示"没有可用的值"
+    # （-SkipEnv，或者写入失败）。
+    if ($SkipEnv) {
+        Write-Info '已指定 -SkipEnv，跳过设置环境变量 CODEX_CLI_PATH（解压出来的 ChatGPT.exe 需要改用 Launch-Codex.cmd 启动，否则会提示没有程序包标识符）。'
+        return $null
+    }
+    try {
+        $existing = $null
+        if (Test-Path -LiteralPath $EnvKeyPath) {
+            $prop = Get-ItemProperty -LiteralPath $EnvKeyPath -Name 'CODEX_CLI_PATH' -ErrorAction SilentlyContinue
+            if ($prop) { $existing = [string]$prop.CODEX_CLI_PATH }
+        }
+        if (-not [string]::IsNullOrWhiteSpace($existing)) {
+            $existingLong = ConvertTo-LongPath $existing
+            $rootPrefix = (ConvertTo-LongPath $InstallRootPath).TrimEnd('\') + '\'
+            $pointsInsideRoot = $existingLong.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)
+            if (-not $pointsInsideRoot) {
+                Write-Warn ('检测到环境变量 CODEX_CLI_PATH 当前指向别处（不是本工具管理的安装根目录），可能是你自己设置的：' + $existing)
+                if ($KeepEnv) {
+                    Write-Info '已指定 -KeepEnv，保留原值不覆盖（本次启动 Codex 用的仍是这个值，如果它已经失效，应用可能无法启动）。'
+                    return $existing
+                }
+                Write-Info '未指定 -KeepEnv，将覆盖为本次安装的版本（如需保留原值请改用 -KeepEnv 重新安装，或用 -SkipEnv 完全不碰这个变量）。'
+            } elseif ($existingLong -ieq (ConvertTo-LongPath $CliExePath)) {
+                Write-Ok ('环境变量 CODEX_CLI_PATH 已经指向这个版本，无需修改：' + $existing)
+                return $existing
+            }
+        }
+        if (-not (Test-Path -LiteralPath $EnvKeyPath)) { New-Item -Path $EnvKeyPath -Force | Out-Null }
+        Set-ItemProperty -LiteralPath $EnvKeyPath -Name 'CODEX_CLI_PATH' -Value $CliExePath -Type String
+        [void](Send-EnvironmentChangeBroadcast)
+        Write-Ok ('已设置当前用户环境变量 CODEX_CLI_PATH = ' + $CliExePath)
+        Write-Info '这样从资源管理器 / 开始菜单 / 任务栏直接启动 ChatGPT.exe 时，也能跳过 Windows 的"程序包标识"检查（免安装版本来就没有这个标识）。已经打开的程序窗口不会立刻感知到这个变化，新开的程序通常能马上读到新值；如果某个入口启动失败，注销重新登录一次即可。'
+        return $CliExePath
+    } catch {
+        Write-Warn ('设置环境变量 CODEX_CLI_PATH 失败（不影响本次启动，可以手动在"编辑账户的环境变量"里添加，或改用 Launch-Codex.cmd 启动）：' + $_.Exception.Message)
+        return $null
+    }
 }
 
 # 从 LocalServer32 默认值（可能带引号和参数）里取出 exe 路径
@@ -648,6 +726,11 @@ try {
         Write-Info '没有发现已固定到任务栏的 Codex 快捷方式，不会自动固定；如需要，可在 Codex.lnk 或 ChatGPT.exe 上右键选择"固定到任务栏"。'
     }
 
+    # ---- 5b. 设置 CODEX_CLI_PATH（免包标识启动的关键一步） ----
+    Write-Step '设置环境变量 CODEX_CLI_PATH'
+    $cliExePath = Join-Path $targetDir 'resources\codex.exe'
+    $effectiveCliPath = Set-CodexCliPathEnv $EnvKey $cliExePath $InstallRoot
+
     # ---- 6. 注册"已安装的应用" ----
     if (-not $SkipRegistry) {
         Write-Step '登记到"已安装的应用"'
@@ -721,7 +804,13 @@ try {
     # ---- 10. 启动 ----
     if (-not $NoLaunch) {
         Write-Step '启动 Codex'
-        try { Start-Process -FilePath $exePath -WorkingDirectory $targetDir; Write-Ok '已启动。' }
+        try {
+            # 当前进程刚设置的用户环境变量，子进程默认不会重新去注册表读——
+            # 显式给这次 Start-Process 也带上，免得安装完立即启动这一次反而失败。
+            if ($effectiveCliPath) { $env:CODEX_CLI_PATH = $effectiveCliPath }
+            Start-Process -FilePath $exePath -WorkingDirectory $targetDir
+            Write-Ok '已启动。'
+        }
         catch { Write-Warn ('启动失败：' + $_.Exception.Message) }
     }
 
@@ -732,6 +821,15 @@ try {
     if ($ReleaseTag) { Write-Host ('  发布 tag  ：' + $ReleaseTag) }
     Write-Host ('  安装位置  ：' + $targetDir)
     Write-Host ('  安装根目录：' + $InstallRoot)
+    if ($SkipEnv) {
+        Write-Host '  环境变量  ：已跳过（-SkipEnv），直接双击 ChatGPT.exe 可能提示没有程序包标识符，请改用 Launch-Codex.cmd'
+    } elseif ($effectiveCliPath -and ($effectiveCliPath -ieq $cliExePath)) {
+        Write-Host ('  环境变量  ：CODEX_CLI_PATH = ' + $effectiveCliPath + '（当前用户，免包标识启动靠它）')
+    } elseif ($effectiveCliPath) {
+        Write-Host ('  环境变量  ：CODEX_CLI_PATH 保留为你原来设置的值（-KeepEnv）：' + $effectiveCliPath)
+    } else {
+        Write-Host '  环境变量  ：设置失败，直接双击 ChatGPT.exe 可能提示没有程序包标识符，请改用 Launch-Codex.cmd（详见上面的警告）'
+    }
     Write-Host ('  开始菜单  ：' + $startLnk)
     if (-not $NoDesktopShortcut) { Write-Host ('  桌面快捷  ：' + $desktopLnk) }
     Write-Host '  用户数据  ：%APPDATA%\Codex 与 %USERPROFILE%\.codex（升级/卸载默认不会动它们）'

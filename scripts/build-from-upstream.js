@@ -16,6 +16,7 @@ const crypto = require("crypto");
 const { execSync, execFileSync } = require("child_process");
 const { findSevenZip } = require("./lib/sevenzip");
 const { parseCliMode, readCliChoice, resolveCliChoice } = require("./lib/cli-policy");
+const { detectIntegrityEnforcement } = require("./lib/asar-integrity");
 
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const SRC_DIR = path.join(PROJECT_ROOT, "src");
@@ -274,23 +275,49 @@ function buildWin(platform) {
   copyRecursive(appDir, outApp);
 
   const resourcesDir = path.join(outApp, "resources");
-
-  // Compute old ASAR header hash (before repack)
   const asarPath = path.join(resourcesDir, "app.asar");
-  const oldHash = computeAsarHeaderHash(asarPath);
-  console.log(`   [integrity] old hash: ${oldHash.slice(0, 16)}...`);
 
-  // Repack patched ASAR
-  console.log("   [asar pack] _asar/ -> app.asar");
-  execSync(`npx asar pack "${asarDir}" "${asarPath}"`);
+  // ─── 是否重打 app.asar ──────────────────────────────────────
+  // 默认（asarModified=false，即 patch-all.js 没有请求打补丁，或请求了
+  // 但被完整性检测拒绝）：保持 MSIX 自带的官方 app.asar 原样，不重打、
+  // 不改任何 exe/dll —— app.asar 里的这份内容和 out/ 里 ChatGPT.exe 内嵌
+  // 的头哈希天然一致，官方签名、官方完整性校验都不受影响。
+  // 只有 patch-report.json 里 asarModified=true（显式 --patch-asar 且
+  // 确认当前运行时没有强制校验）才重打 asar 并修补内嵌哈希，这是给
+  // 未来某个没有完整性校验的运行时留的旧逻辑。
+  const patchReport = readJson(path.join(platformDir, ".patch-report.json"), {
+    applied: [], noop: [], skipped: [], asarModified: false, patchAsarRequested: false,
+  });
+  const asarModified = !!patchReport.asarModified;
 
-  // Compute new hash and patch exe
-  const newHash = computeAsarHeaderHash(asarPath);
-  console.log(`   [integrity] new hash: ${newHash.slice(0, 16)}...`);
+  if (asarModified) {
+    console.log("   [asar] patch-report.json: asarModified=true -> 重新打包 _asar/ -> app.asar 并修补内嵌完整性哈希");
 
-  if (oldHash !== newHash) {
-    patchAsarIntegrityInBinaries(outApp, oldHash, newHash);
+    // Compute old ASAR header hash (before repack)
+    const oldHash = computeAsarHeaderHash(asarPath);
+    console.log(`   [integrity] old hash: ${oldHash.slice(0, 16)}...`);
+
+    // Repack patched ASAR
+    console.log("   [asar pack] _asar/ -> app.asar");
+    execSync(`npx asar pack "${asarDir}" "${asarPath}"`);
+
+    // Compute new hash and patch exe
+    const newHash = computeAsarHeaderHash(asarPath);
+    console.log(`   [integrity] new hash: ${newHash.slice(0, 16)}...`);
+
+    if (oldHash !== newHash) {
+      patchAsarIntegrityInBinaries(outApp, oldHash, newHash);
+    }
+  } else {
+    console.log(
+      "   [asar] 保持官方 app.asar 原样，未重打、未改动任何 exe/dll" +
+      (patchReport.patchAsarRequested ? "（已请求 --patch-asar 但被完整性检测拒绝，见 patch-all 日志）" : "（默认纯官方模式）")
+    );
   }
+
+  // 记录本次构建产物实际的完整性校验强制情况（仅供 BUILD-INFO 参考）
+  const integrity = detectIntegrityEnforcement([outApp, appDir]);
+  console.log(`   [完整性检测] 本次构建产物: ${integrity.enforced ? "已启用完整性校验（不能改动 app.asar）" : "未检测到强制校验"}`);
 
   // ─── CLI 策略 ───────────────────────────────────────────────
   // 默认 auto：官方 CLI 通常比 @cometix/codex 新，不能无脑替换，
@@ -332,7 +359,6 @@ function buildWin(platform) {
   // 旧的 version 字段保留，语义仍是 appVersion。
   const version = getVersion(asarDir);
   const source = readJson(path.join(platformDir, ".source-msix.json"), {});
-  const patchReport = readJson(path.join(platformDir, ".patch-report.json"), { applied: [], noop: [], skipped: [] });
   const msixVersion = source.msixVersion || source.version
     || parseMsixVersionFromName(source.sourceMsix) || null;
   const zipName = `Codex-win-x64-${version}.zip`;
@@ -356,17 +382,27 @@ function buildWin(platform) {
     },
     patches: {
       // applied = 确实发生了替换；noop = 正常退出但一处都没匹配（补丁在
-      // 当前上游版本上已失效）；skipped = 被前置条件主动跳过
+      // 当前上游版本上已失效）；skipped = 被前置条件主动跳过（默认模式
+      // 下就是全部补丁——保持官方文件原样，见 skippedReasons）
       applied: patchReport.applied || [],
       noop: patchReport.noop || [],
       skipped: patchReport.skipped || [],
+      skippedReasons: patchReport.skippedReasons || {},
     },
     decodedPaths: typeof source.decodedPaths === "number" ? source.decodedPaths : null,
+    // asarModified=false（默认）：app.asar 与随包发布的所有 exe/dll 都是
+    // MSIX 里的官方文件，字节未动，签名全部有效；免安装启动改由安装脚本
+    // 设置环境变量 CODEX_CLI_PATH 实现（见 launch 字段），不再依赖修改
+    // app.asar 里的 codexWindowsAppContainedCore。
+    asarModified,
+    launch: asarModified ? "patched:codexWindowsAppContainedCore=0" : "env:CODEX_CLI_PATH",
+    asarIntegrityEnforced: integrity.enforced,
   };
   fs.writeFileSync(path.join(outApp, "BUILD-INFO.json"), JSON.stringify(buildInfo, null, 2) + "\n");
   console.log(
     `   [build-info] BUILD-INFO.json 已写入 (appVersion=${buildInfo.appVersion}, ` +
-    `msixVersion=${buildInfo.msixVersion}, cli=${buildInfo.cli.used}, decodedPaths=${buildInfo.decodedPaths})`
+    `msixVersion=${buildInfo.msixVersion}, cli=${buildInfo.cli.used}, decodedPaths=${buildInfo.decodedPaths}, ` +
+    `asarModified=${buildInfo.asarModified}, launch=${buildInfo.launch}, asarIntegrityEnforced=${buildInfo.asarIntegrityEnforced})`
   );
 
   // ─── ZIP + SHA256SUMS.txt ───────────────────────────────────

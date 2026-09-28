@@ -14,12 +14,15 @@
  *
  * 检查项：
  *   A. 产物里没有任何百分号编码路径（%XX）
- *   B. 与官方参照逐文件一致（大小 + 关键文件 SHA-256）
+ *   B. 与官方参照逐文件一致（大小 + 关键文件 SHA-256；纯官方模式下 app.asar 也要逐字节一致）
  *   C. computer use 组件完整且 @oai/sky 可被加载
  *   D. resources/codex.exe 可运行，版本符合预期，并报告 thread/delete 支持情况
  *   E. 官方二进制数字签名仍然有效（证明没有误改）
  *   F. app.asar 可被 asar list 读取
- *   G. （--smoke）在隔离环境里真的启动一次应用，确认能起来
+ *   H. 启动方式：纯官方模式下 codexWindowsAppContainedCore 未被改动，且产物根目录带
+ *      Install-Codex.cmd / Launch-Codex.cmd（免包标识启动靠它们设置 CODEX_CLI_PATH）
+ *   G. （--smoke）在隔离环境里真的启动一次应用，确认能起来（纯官方模式下按用户实际
+ *      的启动方式设置 CODEX_CLI_PATH）
  *
  * 任一致命项失败 -> 退出码 1。
  */
@@ -30,6 +33,8 @@ const os = require("os");
 const { execFileSync, execSync, spawn } = require("child_process");
 const { findEncodedPaths } = require("./lib/msix-paths");
 const { parseVersion, detectThreadDelete } = require("./lib/cli-policy");
+const { detectIntegrityEnforcement } = require("./lib/asar-integrity");
+const asar = require("@electron/asar");
 
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const IS_WIN = process.platform === "win32";
@@ -142,7 +147,7 @@ function checkEncodedPaths(appDir) {
 
 const KEY_BINARIES = ["ChatGPT.exe", "Codex.exe", "chrome.dll"];
 
-function checkReference(appDir, referenceDir, cliMode) {
+function checkReference(appDir, referenceDir, cliMode, asarModified) {
   if (!referenceDir) {
     return record("B", "与官方参照一致", "skip", {
       details: ["未提供 --reference，跳过逐文件比对"],
@@ -154,8 +159,11 @@ function checkReference(appDir, referenceDir, cliMode) {
     });
   }
 
-  // app.asar 是被补丁过的；cometix 模式下 codex.exe 是被替换的
-  const allowDiff = new Set([path.join("resources", "app.asar")]);
+  // app.asar 只有在 asarModified=true（打了补丁）时才允许和参照不一致；
+  // 纯官方模式（asarModified=false，默认）下 app.asar 也必须与官方逐字节一致。
+  // cometix 模式下 codex.exe 是被替换的，永远豁免。
+  const allowDiff = new Set();
+  if (asarModified) allowDiff.add(path.join("resources", "app.asar"));
   if (cliMode === "cometix") allowDiff.add(path.join("resources", "codex.exe"));
 
   const refFiles = listFilesRel(referenceDir);
@@ -171,9 +179,10 @@ function checkReference(appDir, referenceDir, cliMode) {
     if (a !== b) sizeMismatch.push(`${rel} (官方 ${a} / 产物 ${b})`);
   }
 
-  // 关键文件 SHA-256
+  // 关键文件 SHA-256：纯官方模式下 app.asar 也要逐字节一致，一并加入检查
   const hashTargets = [...KEY_BINARIES];
   if (cliMode !== "cometix") hashTargets.push(path.join("resources", "codex.exe"));
+  if (!asarModified) hashTargets.push(path.join("resources", "app.asar"));
   const hashMismatch = [];
   const hashOk = [];
   for (const rel of hashTargets) {
@@ -187,7 +196,8 @@ function checkReference(appDir, referenceDir, cliMode) {
   }
 
   const details = [
-    `参照文件 ${refFiles.length} 个，豁免比对 ${[...allowDiff].join(", ")}`,
+    `模式: ${asarModified ? "打过补丁（app.asar 允许不一致）" : "纯官方（app.asar 也必须逐字节一致）"}`,
+    `参照文件 ${refFiles.length} 个，豁免比对 ${[...allowDiff].join(", ") || "(无)"}`,
     `关键文件 SHA-256 一致: ${hashOk.length}/${hashTargets.length}`,
     ...hashOk.map((s) => `  ${s}`),
   ];
@@ -490,6 +500,69 @@ function checkSignatures(appDir, cliMode) {
   return record("E", "官方二进制数字签名", "pass", { details });
 }
 
+// ─── H. 启动方式（纯官方模式下用环境变量代替改 app.asar） ───────
+//
+// 纯官方模式（asarModified=false，默认）下，免安装启动不再靠把
+// codexWindowsAppContainedCore 从 "1" 改成 "0" 来绕过包标识检查，而是
+// 由 Install-Codex.cmd / Launch-Codex.cmd 在启动前设置环境变量
+// CODEX_CLI_PATH（bootstrap 的门函数只要看到它非空就会跳过包标识检查）。
+// 这里确认：
+//   1. app.asar 里的 codexWindowsAppContainedCore 确实还是官方原值
+//      （没有被偷偷改动——如果改了，说明构建脚本的判断和实际不一致）
+//   2. 产物根目录带着 Install-Codex.cmd 和 Launch-Codex.cmd（它们负责
+//      设置 CODEX_CLI_PATH，免安装用户就是靠它们启动的）
+//
+// 旧的补丁模式（asarModified=true）下检查反过来：确认这个键确实被改成
+// 了 "0"，这是它当年绕过包标识检查的手段。
+function checkStartupMethod(appDir, buildInfo) {
+  const asarModified = !!(buildInfo && buildInfo.asarModified);
+  const asarPath = path.join(appDir, "resources", "app.asar");
+  const details = [`模式: ${asarModified ? "补丁模式（预期 codexWindowsAppContainedCore=\"0\"）" : "纯官方模式（预期 codexWindowsAppContainedCore 保持官方原值，未被改动）"}`];
+
+  if (!fs.existsSync(asarPath)) {
+    return record("H", "启动方式", "fail", { details: [...details, `缺失 ${asarPath}`] });
+  }
+
+  let containedCore;
+  try {
+    const buf = asar.extractFile(asarPath, "package.json");
+    const pkg = JSON.parse(buf.toString("utf-8"));
+    containedCore = pkg.codexWindowsAppContainedCore;
+  } catch (e) {
+    return record("H", "启动方式", "fail", {
+      details: [...details, `读取 app.asar/package.json 失败: ${e.message}`],
+    });
+  }
+  details.push(`app.asar/package.json 里 codexWindowsAppContainedCore = ${JSON.stringify(containedCore)}`);
+
+  const problems = [];
+  if (asarModified) {
+    if (String(containedCore) !== "0") {
+      problems.push('补丁模式下期望该值为 "0"（patch-portable-mode.js 应该已经改过），但实际不是');
+    }
+  } else {
+    if (String(containedCore) === "0") {
+      problems.push('纯官方模式下这个值不应该被改动，但实际是 "0"——app.asar 被动过手脚，与 asarModified=false 的自述矛盾');
+    }
+  }
+
+  if (!asarModified) {
+    for (const rel of ["Install-Codex.cmd", "Launch-Codex.cmd"]) {
+      const p = path.join(appDir, rel);
+      if (fs.existsSync(p)) {
+        details.push(`  存在 ${rel}`);
+      } else {
+        problems.push(`纯官方模式依赖 ${rel} 设置 CODEX_CLI_PATH 才能免包标识启动，但产物根目录缺失它`);
+      }
+    }
+  }
+
+  if (problems.length) {
+    return record("H", "启动方式", "fail", { details: [...details, ...problems.map((p) => `[!] ${p}`)] });
+  }
+  return record("H", "启动方式", "pass", { details });
+}
+
 // ─── F. app.asar 可读 ───────────────────────────────────────────
 
 function checkAsar(appDir) {
@@ -536,11 +609,17 @@ function checkAsar(appDir) {
 //                                     由 LOCALAPPDATA 决定而不是 userData，
 //                                     所以必须连它一起改掉才能隔离日志。
 // ⚠ 隔离并不完全：内置浏览器 profile 仍写到真实的 %APPDATA%\Codex\web\Codex，见 checkSmoke 里的保护。
-// 故意**不设** CODEX_CLI_PATH —— 它是上面那个开关的旁路条件之一，设了
-// 就会掩盖真正的问题。
+// CODEX_CLI_PATH：纯官方模式（asarModified=false，默认）下会设置它指向
+// resources\codex.exe——这正是 Install-Codex.cmd/Launch-Codex.cmd 的做法，
+// 也是本次要验证的真实启动路径。补丁模式（asarModified=true，legacy）下
+// 故意不设，因为那套模式靠的是把 codexWindowsAppContainedCore 改成 "0"，
+// 设了 CODEX_CLI_PATH 反而会掩盖"补丁是否真的生效"这件事。
 
 const SMOKE_FAIL_MARKER = "Desktop bootstrap failed";
 const SMOKE_OK_MARKER = "Launching app";
+// 26.924 起若 app.asar 头哈希和 ChatGPT.exe/chrome.dll 里记录的不一致，
+// Electron 会直接 FATAL 崩溃退出，日志（或崩溃对话框对应的日志）里会有这行。
+const INTEGRITY_FAIL_MARKER = "Integrity check failed";
 
 /**
  * 找出当前在跑的 Codex 桌面应用进程。
@@ -613,7 +692,8 @@ function dirFingerprint(p) {
   } catch { return "(不存在)"; }
 }
 
-async function checkSmoke(appDir, enabled, force) {
+async function checkSmoke(appDir, enabled, force, buildInfo) {
+  const asarModified = !!(buildInfo && buildInfo.asarModified);
   if (!enabled) {
     return record("G", "启动冒烟测试", "skip", {
       fatal: false,
@@ -677,11 +757,22 @@ async function checkSmoke(appDir, enabled, force) {
   const before = {};
   for (const [k, p] of Object.entries(realProbes)) before[k] = dirFingerprint(p);
 
+  // 纯官方模式（asarModified=false，默认）：按用户实际的启动方式来测——
+  // 也就是 Install-Codex.cmd / Launch-Codex.cmd 会做的事：设置
+  // CODEX_CLI_PATH 指向随包的 codex.exe，这样 bootstrap 的门函数就会跳过
+  // 包标识检查。这是本次冒烟测试要验证的启动路径本身，不是在"掩盖问题"。
+  //
+  // 补丁模式（asarModified=true，legacy）：保持旧逻辑，故意不设
+  // CODEX_CLI_PATH，因为那套模式靠的是把 codexWindowsAppContainedCore
+  // 改成 "0"，设 CODEX_CLI_PATH 反而会掩盖"补丁是否真的生效"这件事。
+  const cliPathForSmoke = path.join(appDir, "resources", "codex.exe");
   const details = [
     `隔离环境: userData=${userData}`,
     `           CODEX_HOME=${codexHome}`,
     `           LOCALAPPDATA=${localAppData}（日志会落在它下面的 Codex\\Logs）`,
-    "（故意不设 CODEX_CLI_PATH —— 它是包标识检查的旁路条件，设了会掩盖问题）",
+    asarModified
+      ? "（补丁模式：故意不设 CODEX_CLI_PATH —— 它是包标识检查的旁路条件，设了会掩盖 asar 补丁是否真的生效）"
+      : `（纯官方模式：按用户实际的启动方式设置 CODEX_CLI_PATH=${cliPathForSmoke}，与 Install-Codex.cmd/Launch-Codex.cmd 的做法一致）`,
   ];
 
   const startedAt = Date.now() - 1000;
@@ -709,6 +800,7 @@ async function checkSmoke(appDir, enabled, force) {
         CODEX_ELECTRON_USER_DATA_PATH: userData,
         CODEX_HOME: codexHome,
         LOCALAPPDATA: localAppData,
+        ...(asarModified ? {} : { CODEX_CLI_PATH: cliPathForSmoke }),
       },
       stdio: "ignore",
       windowsHide: true,
@@ -726,7 +818,7 @@ async function checkSmoke(appDir, enabled, force) {
     while (Date.now() < deadline) {
       await sleep(1500);
       logText = readLogs(collectLogs(logRoot, startedAt));
-      if (logText.includes(SMOKE_FAIL_MARKER)) { verdict = "fail"; break; }
+      if (logText.includes(SMOKE_FAIL_MARKER) || logText.includes(INTEGRITY_FAIL_MARKER)) { verdict = "fail"; break; }
       if (logText.includes(SMOKE_OK_MARKER)) { sawOk = true; break; }
       if (exited) break;
     }
@@ -737,7 +829,7 @@ async function checkSmoke(appDir, enabled, force) {
       while (Date.now() < watchUntil) {
         await sleep(2000);
         logText = readLogs(collectLogs(logRoot, startedAt));
-        if (logText.includes(SMOKE_FAIL_MARKER)) { verdict = "fail"; break; }
+        if (logText.includes(SMOKE_FAIL_MARKER) || logText.includes(INTEGRITY_FAIL_MARKER)) { verdict = "fail"; break; }
       }
       if (verdict !== "fail") verdict = exited ? "warn" : "pass";
       if (verdict === "warn") details.push(`[!] 进程已退出（${exitInfo}），但日志里出现过 ${SMOKE_OK_MARKER}`);
@@ -766,12 +858,24 @@ async function checkSmoke(appDir, enabled, force) {
     if (errLines.length) details.push(...errLines.slice(0, 5).map((l) => `    ${l.slice(0, 220)}`));
 
     if (verdict === "fail") {
-      const m = logText.match(/[^\n]*Desktop bootstrap failed[^\n]*/);
-      details.push(`  失败日志: ${(m ? m[0] : "").slice(0, 300)}`);
-      details.push(
-        "应用启动失败：该版本要求 Windows「程序包标识」，而免安装包没有包标识。",
-        "请检查 app.asar/package.json 里的 codexWindowsAppContainedCore 是否已被 patch-portable-mode 置为 \"0\"。"
-      );
+      const bootstrapM = logText.match(/[^\n]*Desktop bootstrap failed[^\n]*/);
+      const integrityM = logText.match(new RegExp(`[^\\n]*${INTEGRITY_FAIL_MARKER}[^\\n]*`));
+      if (integrityM) {
+        details.push(`  失败日志: ${integrityM[0].slice(0, 300)}`);
+        details.push(
+          "应用启动失败：app.asar 完整性校验没通过（FATAL Integrity check failed for asar archive）。",
+          "纯官方模式下这不应该发生——说明 app.asar 或 ChatGPT.exe/chrome.dll 里有一个被改动了，" +
+          "请检查本次构建的 asarModified/BUILD-INFO.json 是否如实反映了实际状态。"
+        );
+      } else {
+        details.push(`  失败日志: ${(bootstrapM ? bootstrapM[0] : "").slice(0, 300)}`);
+        details.push(
+          "应用启动失败：该版本要求 Windows「程序包标识」，而免安装包没有包标识。",
+          asarModified
+            ? '请检查 app.asar/package.json 里的 codexWindowsAppContainedCore 是否已被 patch-portable-mode 置为 "0"。'
+            : "纯官方模式下应该是靠 CODEX_CLI_PATH 环境变量跳过包标识检查——请确认本次冒烟测试真的设置了它（见上面的隔离环境说明）。"
+        );
+      }
     }
   } catch (e) {
     verdict = "fail";
@@ -829,17 +933,24 @@ async function main() {
     console.log(`              patches.applied=${(buildInfo.patches?.applied || []).join(",") || "(无)"}`);
     console.log(`              patches.noop   =${(buildInfo.patches?.noop || []).join(",") || "(无)"}`);
     console.log(`              patches.skipped=${(buildInfo.patches?.skipped || []).join(",") || "(无)"}`);
+    console.log(`              asarModified=${buildInfo.asarModified} launch=${buildInfo.launch || "(未记录)"} asarIntegrityEnforced=${buildInfo.asarIntegrityEnforced}`);
   }
   if (!IS_WIN) console.log("   [!] 非 Windows 平台：执行类检查（C/D/E）会被跳过");
   console.log("");
 
+  // asarModified 缺失（旧构建、没有 BUILD-INFO.json）时按 false 处理，
+  // 也就是按"纯官方模式"最严格的标准去比对——不会漏放一个实际被动过
+  // 手脚但自己没如实记录的产物。
+  const asarModified = !!(buildInfo && buildInfo.asarModified);
+
   checkEncodedPaths(appDir);
-  checkReference(appDir, referenceDir, cliMode);
+  checkReference(appDir, referenceDir, cliMode, asarModified);
   checkComputerUse(appDir);
   checkCli(appDir, referenceDir, cliMode, buildInfo);
   checkSignatures(appDir, cliMode);
   checkAsar(appDir);
-  await checkSmoke(appDir, !!opts.smoke, !!opts["smoke-force"]);
+  checkStartupMethod(appDir, buildInfo);
+  await checkSmoke(appDir, !!opts.smoke, !!opts["smoke-force"], buildInfo);
 
   // ─── 摘要 ──────────────────────────────────────────────────
   console.log("\n== 自检结果 ==\n");

@@ -12,10 +12,25 @@
  * CLI 策略（--cli / 环境变量 CODEX_CLI，默认 auto）在这里就确定下来，
  * 决定写进 src/<platform>/.cli-choice.json，build-from-upstream 复用。
  *
+ * ─── app.asar 补丁默认关闭 ──────────────────────────────────────
+ * 自 26.924 起，官方运行时给 app.asar 加了完整性校验（chrome.dll 的
+ * Electron fuse EnableEmbeddedAsarIntegrityValidation=1，且 ChatGPT.exe
+ * 内嵌了官方 app.asar 头的 SHA-256）。app.asar 只要被改动一个字节，
+ * 头哈希就会变，启动即 `Integrity check failed for asar archive` 崩溃。
+ * 所以这里默认**不对 _asar 做任何修改**——保持官方文件原样，下面所有
+ * 补丁都记为 skipped。
+ *
+ * 只有显式传 `--patch-asar` 或设置环境变量 `PATCH_ASAR=1` 才会尝试真的
+ * 打补丁；即便如此，如果检测到当前源（src/<platform> 或 sync 缓存的
+ * MSIX 解压目录）已经启用了上述完整性校验，也会直接拒绝并报错退出——
+ * 这个开关只是留给"以后遇到没有完整性校验的运行时"用的逃生舱，不是
+ * 绕过校验的手段。
+ *
  * 每个补丁的结果分四类，写进 src/<platform>/.patch-report.json：
  *   applied  确实发生了替换
  *   noop     正常退出但一处都没匹配（补丁在当前上游版本上已失效）
- *   skipped  被前置条件主动跳过（目前没有补丁走这条路，字段保留给以后用）
+ *   skipped  被前置条件主动跳过（默认模式下 = 全部补丁；具体原因见
+ *            .patch-report.json 的 skippedReasons）
  *   failed   非 0 退出
  * noop 会在 stdout 打 GitHub Actions 的 ::warning 注解，但不让 job 失败。
  */
@@ -23,6 +38,7 @@ const { spawnSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const { parseCliMode, resolveCliChoice } = require("./lib/cli-policy");
+const { detectIntegrityEnforcement, defaultWinCandidateRoots } = require("./lib/asar-integrity");
 
 const SRC_DIR = path.join(__dirname, "..", "src");
 
@@ -155,42 +171,97 @@ function main() {
 
   const useCometix = choices.some((c) => c.useCometix);
 
+  // ─── app.asar 补丁开关 ─────────────────────────────────────────
+  const patchAsarRequested = args.includes("--patch-asar") || process.env.PATCH_ASAR === "1";
+  console.log(`\n== app.asar 补丁: ${patchAsarRequested ? "已请求（--patch-asar / PATCH_ASAR=1）" : "默认关闭（保持官方文件原样）"} ==`);
+
+  let integrityCheck = null;
+  if (targets.includes("win")) {
+    const winPlatformDir = path.join(SRC_DIR, "win");
+    const roots = defaultWinCandidateRoots({ platformDir: winPlatformDir });
+    integrityCheck = detectIntegrityEnforcement(roots);
+    console.log(`   [完整性检测] 已检查目录: ${integrityCheck.checkedRoots.join(", ") || "(无，均不存在)"}`);
+    if (integrityCheck.fuses && integrityCheck.fuses.found) {
+      console.log(
+        `   [完整性检测] chrome.dll fuse: EnableEmbeddedAsarIntegrityValidation=${integrityCheck.fuses.asarIntegrityEnabled}` +
+        ` OnlyLoadAppFromAsar=${integrityCheck.fuses.onlyLoadFromAsar}（${integrityCheck.fuses.source}）`
+      );
+    } else {
+      console.log(`   [完整性检测] chrome.dll: ${integrityCheck.fuses ? integrityCheck.fuses.reason : "未找到"}`);
+    }
+    if (integrityCheck.embedded && integrityCheck.embedded.found) {
+      console.log(`   [完整性检测] ChatGPT.exe 内嵌 asar 哈希: ${integrityCheck.embedded.entries.length} 条（${integrityCheck.embedded.source}）`);
+    } else {
+      console.log(`   [完整性检测] ChatGPT.exe: ${integrityCheck.embedded ? integrityCheck.embedded.reason : "未找到"}`);
+    }
+    console.log(`   [完整性检测] 结论: ${integrityCheck.enforced ? "已启用完整性校验（改动 app.asar 会导致启动崩溃）" : "未检测到强制校验"}`);
+  } else {
+    console.log("   [完整性检测] 目标平台不含 win，跳过（该检测目前只覆盖 Windows 运行时）");
+  }
+
+  if (patchAsarRequested && integrityCheck && integrityCheck.enforced) {
+    console.error(
+      "\n[x] 已请求 --patch-asar / PATCH_ASAR=1，但检测到当前运行时已启用 app.asar 完整性校验\n" +
+      "    （chrome.dll fuse EnableEmbeddedAsarIntegrityValidation=1 和/或 ChatGPT.exe 内嵌了 asar 头哈希）。\n" +
+      "    在这套运行时上修改 app.asar 会导致应用启动崩溃（Integrity check failed for asar archive），\n" +
+      "    已拒绝执行任何补丁。--patch-asar 只用于未来某个不做完整性校验的运行时，不是绕过校验的手段。"
+    );
+    process.exit(1);
+  }
+
+  const doPatch = patchAsarRequested; // 到这里说明：要么没请求，要么请求了但校验证实安全
+
   // ─── 执行补丁 ────────────────────────────────────────────────
   const applied = [];
   const noop = [];
   const skipped = [];
   const failedList = [];
   const noopEvidence = {};
+  const skippedReasons = {};
 
-  for (const script of PATCHES) {
-    const label = script.replace(".js", "");
-    const scriptPath = path.join(__dirname, script);
-    console.log(`\n== ${label} ==`);
-
-    // stdio 用 pipe 以便分类，随后原样转发，日志内容和以前一致
-    const res = spawnSync("node", [scriptPath, ...passArgs], {
-      encoding: "utf-8",
-      maxBuffer: 64 * 1024 * 1024,
-    });
-    if (res.stdout) process.stdout.write(res.stdout);
-    if (res.stderr) process.stderr.write(res.stderr);
-
-    if (res.error || res.status !== 0) {
-      console.error(`[x] ${label} failed (exit ${res.status ?? "n/a"}${res.error ? `, ${res.error.message}` : ""})`);
-      failedList.push(label);
-      continue;
+  if (!doPatch) {
+    const reason = patchAsarRequested
+      ? "完整性检测通过但仍未生效（不应该出现，若看到请检查逻辑）"
+      : "保持官方文件原样：26.924 起 app.asar 受完整性校验保护（未设置 PATCH_ASAR=1 / --patch-asar）";
+    for (const script of PATCHES) {
+      const label = script.replace(".js", "");
+      skipped.push(label);
+      skippedReasons[label] = reason;
+      console.log(`[skipped] ${label}：${reason}`);
     }
+  } else {
+    for (const script of PATCHES) {
+      const label = script.replace(".js", "");
+      const scriptPath = path.join(__dirname, script);
+      console.log(`\n== ${label} ==`);
 
-    const { verdict, evidence } = classifyPatchOutput(res.stdout);
-    if (verdict === "applied") {
-      applied.push(label);
-      console.log(`[applied] ${label}：检测到 ${evidence.length >= 5 ? "≥5" : evidence.length} 条生效证据，例如 ${JSON.stringify(evidence[0])}`);
-    } else {
-      noop.push(label);
-      noopEvidence[label] = tailLines(res.stdout, 3);
-      console.log(`[noop] ${label}：正常退出但没有任何替换生效，当前版本上该补丁是空转`);
+      // stdio 用 pipe 以便分类，随后原样转发，日志内容和以前一致
+      const res = spawnSync("node", [scriptPath, ...passArgs], {
+        encoding: "utf-8",
+        maxBuffer: 64 * 1024 * 1024,
+      });
+      if (res.stdout) process.stdout.write(res.stdout);
+      if (res.stderr) process.stderr.write(res.stderr);
+
+      if (res.error || res.status !== 0) {
+        console.error(`[x] ${label} failed (exit ${res.status ?? "n/a"}${res.error ? `, ${res.error.message}` : ""})`);
+        failedList.push(label);
+        continue;
+      }
+
+      const { verdict, evidence } = classifyPatchOutput(res.stdout);
+      if (verdict === "applied") {
+        applied.push(label);
+        console.log(`[applied] ${label}：检测到 ${evidence.length >= 5 ? "≥5" : evidence.length} 条生效证据，例如 ${JSON.stringify(evidence[0])}`);
+      } else {
+        noop.push(label);
+        noopEvidence[label] = tailLines(res.stdout, 3);
+        console.log(`[noop] ${label}：正常退出但没有任何替换生效，当前版本上该补丁是空转`);
+      }
     }
   }
+
+  const asarModified = doPatch && applied.length > 0;
 
   // ─── 汇总 + 落盘（供 BUILD-INFO.json 使用）───────────────────
   console.log(`\n== Summary: applied ${applied.length} / noop ${noop.length} / skipped ${skipped.length} / failed ${failedList.length}（共 ${PATCHES.length}）==`);
@@ -198,6 +269,7 @@ function main() {
   console.log(`   noop:    ${noop.join(", ") || "(无)"}`);
   console.log(`   skipped: ${skipped.join(", ") || "(无)"}`);
   if (failedList.length) console.log(`   failed:  ${failedList.join(", ")}`);
+  console.log(`   asarModified: ${asarModified}`);
 
   // GitHub Actions 注解：让空转补丁在 CI 里可见，但不让 job 失败
   for (const label of noop) {
@@ -209,9 +281,29 @@ function main() {
     applied,
     noop,
     skipped,
+    skippedReasons,
     failed: failedList,
     cliMode: mode,
     useCometix,
+    patchAsarRequested,
+    asarModified,
+    integrityCheck: integrityCheck
+      ? {
+          enforced: integrityCheck.enforced,
+          checkedRoots: integrityCheck.checkedRoots,
+          fuses: integrityCheck.fuses
+            ? {
+                found: integrityCheck.fuses.found,
+                asarIntegrityEnabled: integrityCheck.fuses.asarIntegrityEnabled,
+                onlyLoadFromAsar: integrityCheck.fuses.onlyLoadFromAsar,
+                source: integrityCheck.fuses.source,
+              }
+            : null,
+          embedded: integrityCheck.embedded
+            ? { found: integrityCheck.embedded.found, source: integrityCheck.embedded.source }
+            : null,
+        }
+      : null,
     patchedAt: new Date().toISOString(),
   };
   for (const plat of targets) {

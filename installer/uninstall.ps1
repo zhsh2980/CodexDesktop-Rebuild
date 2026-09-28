@@ -15,6 +15,7 @@
 .PARAMETER DesktopDir    桌面目录
 .PARAMETER TaskbarDir    任务栏固定项目录，默认 %APPDATA%\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar
 .PARAMETER RegistryRoot  卸载项所在注册表根
+.PARAMETER EnvKey        CODEX_CLI_PATH 所在的注册表位置，默认 HKCU:\Environment；测试时可指向别处
 .PARAMETER KeepFiles     只清理快捷方式和卸载项，保留安装根目录下所有版本文件夹
 .PARAMETER Yes           不询问
 .PARAMETER NoPause       结束时不等待按键
@@ -26,6 +27,7 @@ param(
     [string]$DesktopDir = [Environment]::GetFolderPath('Desktop'),
     [string]$TaskbarDir = (Join-Path $env:APPDATA 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar'),
     [string]$RegistryRoot = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall',
+    [string]$EnvKey = 'HKCU:\Environment',
     [switch]$KeepFiles,
     [switch]$Yes,
     [switch]$NoPause
@@ -168,6 +170,47 @@ function Get-ShortcutTarget([string]$LnkPath) {
     try { return $ws.CreateShortcut($LnkPath).TargetPath } finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($ws) }
 }
 
+# 广播 WM_SETTINGCHANGE(lParam="Environment")，让已经在跑的资源管理器等进程
+# 尽快感知到环境变量变化。
+function Send-EnvironmentChangeBroadcast {
+    try {
+        if (-not ('CodexInstaller.NativeMethods' -as [type])) {
+            Add-Type -Namespace CodexInstaller -Name NativeMethods -MemberDefinition '
+                [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+                public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+            '
+        }
+        $HWND_BROADCAST = [IntPtr]0xffff
+        $WM_SETTINGCHANGE = 0x1A
+        $SMTO_ABORTIFHUNG = 0x2
+        $result = [UIntPtr]::Zero
+        [void][CodexInstaller.NativeMethods]::SendMessageTimeout($HWND_BROADCAST, $WM_SETTINGCHANGE, [UIntPtr]::Zero, 'Environment', $SMTO_ABORTIFHUNG, 5000, [ref]$result)
+    } catch { }
+}
+
+# 只删除"确实指向本安装根目录"的 CODEX_CLI_PATH；指向别处（用户自己设的，
+# 或者已经手动改过）一律保留不动。
+function Remove-CodexCliPathEnvIfOurs([string]$EnvKeyPath, [string]$InstallRootPath) {
+    try {
+        if (-not (Test-Path -LiteralPath $EnvKeyPath)) { return }
+        $prop = Get-ItemProperty -LiteralPath $EnvKeyPath -Name 'CODEX_CLI_PATH' -ErrorAction SilentlyContinue
+        if (-not $prop) { Write-Info ('环境变量 CODEX_CLI_PATH 本来就不存在，跳过：' + $EnvKeyPath); return }
+        $existing = [string]$prop.CODEX_CLI_PATH
+        if ([string]::IsNullOrWhiteSpace($existing)) { return }
+        $existingLong = ConvertTo-LongPath $existing
+        $rootPrefix = (ConvertTo-LongPath $InstallRootPath).TrimEnd('\') + '\'
+        if ($existingLong.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            Remove-ItemProperty -LiteralPath $EnvKeyPath -Name 'CODEX_CLI_PATH' -ErrorAction Stop
+            Send-EnvironmentChangeBroadcast
+            Write-Ok ('已删除环境变量 CODEX_CLI_PATH（原值指向本安装根目录）：' + $existing)
+        } else {
+            Write-Info ('环境变量 CODEX_CLI_PATH 指向别处（不是本安装根目录），保留不动：' + $existing)
+        }
+    } catch {
+        Write-Warn ('处理环境变量 CODEX_CLI_PATH 时出错（不影响卸载其它部分）：' + $_.Exception.Message)
+    }
+}
+
 # 只删除目标确实指向安装根目录（任意版本）里文件的快捷方式
 function Remove-OurShortcut([string]$LnkPath, [string]$Root) {
     if (-not (Test-Path -LiteralPath $LnkPath)) { return }
@@ -260,6 +303,10 @@ try {
     } else {
         Write-Info '卸载项不存在，跳过。'
     }
+
+    # 3b. 环境变量 CODEX_CLI_PATH（只删除确实指向本安装根目录的）
+    Write-Step '清理环境变量 CODEX_CLI_PATH'
+    Remove-CodexCliPathEnvIfOurs $EnvKey $InstallRoot
 
     # 4. 版本文件夹（只删除带安装标记的；-KeepFiles 时全部保留）
     Write-Step '删除版本文件夹'

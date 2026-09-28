@@ -244,10 +244,10 @@ jobs:
             下载 zip，解压后双击 `Install-Codex.cmd`（不需要管理员）。每个版本装进自己的文件夹，升级不会覆盖旧版本；之后可用开始菜单里的「更新 Codex」升级。详见 README。
 
             ## 这个包做了什么
-            - 由官方 Microsoft Store 软件包（MSIX）展开而成，官方 exe/dll 保留 OpenAI 数字签名；包内 `%40oai` 等编码路径已全部还原（Computer Use 依赖它）。
+            - 由官方 Microsoft Store 软件包（MSIX）展开而成，**所有文件都和官方 MSIX 字节一致，不打任何补丁**：`app.asar`、`ChatGPT.exe`、`chrome.dll` 等全部保留 OpenAI 的官方数字签名；包内 `%40oai` 等编码路径已全部还原（Computer Use 依赖它）。
             - 随包的 `resources\codex.exe` 默认是与应用同版本的官方 CLI。
-            - `codexWindowsAppContainedCore` 已置为 `"0"`，免安装版无需 MSIX 程序包标识即可启动。
-            - 发布前的自检结果见 `verify-report.json`（路径编码、与官方逐文件比对、Computer Use 加载、CLI、数字签名、asar、启动冒烟测试）；构建信息见包内 `BUILD-INFO.json`。
+            - 免安装启动**不再靠修改 app.asar**，而是由安装脚本（`Install-Codex.cmd`）给当前用户设置环境变量 `CODEX_CLI_PATH`，从而跳过 Windows 的「程序包标识」检查；不想安装的话，解压后双击 `Launch-Codex.cmd` 也能达到同样效果。
+            - 发布前的自检结果见 `verify-report.json`（路径编码、与官方逐文件比对——含 `app.asar`、Computer Use 加载、CLI、数字签名、asar、启动方式、真实启动冒烟测试）；构建信息见包内 `BUILD-INFO.json`（`asarModified`/`launch`/`asarIntegrityEnforced` 等字段）。
           files: |
             artifacts/**/*.zip
             artifacts/**/SHA256SUMS.txt
