@@ -1,6 +1,6 @@
 # Codex Desktop Rebuild
 
-OpenAI Codex 桌面应用（Electron）的社区重打包版本。Windows 版每天在 GitHub Actions 上自动重新打包，
+OpenAI Codex 桌面应用（Electron）的社区重打包版本。GitHub Actions 每 3 小时检查一次官方新版，发现新版即自动重新打包 Windows 版，
 以 **免安装 zip** 的形式发布在 [Releases](https://github.com/zhsh2980/CodexDesktop-Rebuild/releases)：
 **下载、解压、双击安装，不需要管理员权限，不需要微软商店。**
 
@@ -254,9 +254,12 @@ npm run dev
 
 ### CI/CD
 
-GitHub Actions automatically builds on:
-- Push to `master`
-- Tag `v*` → Creates draft release
+工作流 `.github/workflows/sync.yml`（Sync Upstream & Patch）：
+
+- **定时**：每 3 小时（UTC 每隔 3 小时的第 17 分钟）检查一次官方 Windows 版本；与 `package.json` 里记录的上次构建版本相同则直接结束，发现新版才构建。GitHub 的定时任务可能比设定时间晚开始数十分钟到数小时。
+- **手动**：Actions 页面运行该工作流，`force` 为强制重建当前版本，`cli` 选择随包的 CLI（默认 `official`）。
+- 构建后自检（`verify-portable.js`，含真实启动冒烟测试）全部通过才会发布；发布时打 `v<商店包版本>` 标签并上传 zip、`SHA256SUMS.txt`、`verify-report.json`。
+- 同一时间只运行一个同步任务，重叠的运行会排队等待。
 
 ## Credits
 

@@ -2,7 +2,9 @@ name: Sync Upstream & Patch
 
 on:
   schedule:
-    - cron: "30 23 * * *" # Daily 23:30 UTC = 07:30 Asia/Shanghai (UTC+8)
+    # 每 3 小时检查一次上游版本（UTC 0:17、3:17……，即北京时间 2:17、5:17、8:17、11:17……）。没有新版本时只跑几十秒的
+    # check 任务就结束，只有发现新版才会构建。分钟数避开整点：GitHub 的定时任务在整点最拥挤，延迟最大。
+    - cron: "17 */3 * * *"
   workflow_dispatch:
     inputs:
       force:
@@ -21,6 +23,12 @@ on:
         type: choice
         options: [official, auto, cometix]
         default: official
+
+# 同一时间只跑一个同步：定时任务被推迟后可能与下一次（或手动触发）重叠，
+# 两个 run 同时发布同一版本会互相覆盖 release、重复提交版本号。后来的排队等待，不取消正在跑的。
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
 
 env:
   NODE_VERSION: "24"
